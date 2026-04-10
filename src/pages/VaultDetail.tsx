@@ -95,17 +95,23 @@ export default function VaultDetail() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ vaultId, prompt: aiPrompt }),
       });
-      if (!res.ok) throw new Error("AI service unavailable");
+      if (!res.ok) {
+        const errBody = await res.text();
+        throw new Error(`Backend error (${res.status}): ${errBody}`);
+      }
       const data = await res.json();
       setAiPreview(data);
-      // Pre-fill proposal form from AI
-      if (data.target) setPropTarget(data.target);
-      if (data.value) setPropValue(data.value);
-      if (data.data) setPropData(data.data);
-      if (data.actionType !== undefined) setPropActionType(data.actionType);
-      if (data.reason) setPropReason(data.reason);
+      // Pre-fill proposal form from normalized response
+      const n = data.normalized;
+      if (n) {
+        if (n.target) setPropTarget(n.target);
+        if (n.valueXtz) setPropValue(n.valueXtz);
+        if (n.dataHex) setPropData(n.dataHex);
+        if (n.actionType !== undefined) setPropActionType(n.actionType);
+        if (n.reason) setPropReason(n.reason);
+      }
     } catch (err: any) {
-      toast.error(err.message || "Failed to get AI preview");
+      toast.error(err.message || "Failed to get proposal preview");
     } finally {
       setAiLoading(false);
     }
