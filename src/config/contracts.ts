@@ -13,7 +13,7 @@ export const CONTRACTS = {
 } as const;
 
 export const BACKEND = {
-  agentServiceBaseUrl: "http://localhost:8788",
+  agentServiceBaseUrl: "https://etherlink-guardian-safe-1.onrender.com",
 } as const;
 
 export const FACTORY_ABI = [
