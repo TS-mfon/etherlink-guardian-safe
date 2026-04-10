@@ -241,9 +241,9 @@ export default function VaultDetail() {
               <div className="grid gap-6 lg:grid-cols-2">
                 {/* AI Preview */}
                 <div className="glass-card p-6">
-                  <h3 className="font-semibold mb-4 flex items-center gap-2">🤖 AI Proposal Preview</h3>
+                  <h3 className="font-semibold mb-4 flex items-center gap-2">🤖 Proposal Preview</h3>
                   <p className="text-xs text-muted-foreground mb-3">
-                    Describe what you want to do and the AI will prepare a proposal for review.
+                    Describe what you want to do and the backend will prepare a proposal for review.
                   </p>
                   <div className="space-y-3">
                     <Input value={aiPrompt} onChange={(e) => setAiPrompt(e.target.value)} placeholder="e.g. Send 1 XTZ to 0x..." />
@@ -251,11 +251,33 @@ export default function VaultDetail() {
                       {aiLoading ? "Generating..." : "Generate Preview"}
                     </Button>
                     {aiPreview && (
-                      <div className="rounded-lg bg-muted p-3 text-sm space-y-1">
-                        <div><span className="text-muted-foreground">Target:</span> <span className="font-mono">{aiPreview.target}</span></div>
-                        <div><span className="text-muted-foreground">Value:</span> {aiPreview.value} XTZ</div>
-                        <div><span className="text-muted-foreground">Type:</span> {aiPreview.actionType === 0 ? "Native Transfer" : "Contract Call"}</div>
-                        <div><span className="text-muted-foreground">Reason:</span> {aiPreview.reason}</div>
+                      <div className="rounded-lg bg-muted p-3 text-sm space-y-2">
+                        {aiPreview.intent && (
+                          <div><span className="text-muted-foreground">Intent:</span> {aiPreview.intent}</div>
+                        )}
+                        {aiPreview.normalized && (
+                          <>
+                            <div><span className="text-muted-foreground">Target:</span> <span className="font-mono text-xs">{aiPreview.normalized.target}</span></div>
+                            <div><span className="text-muted-foreground">Value:</span> {aiPreview.normalized.valueXtz} XTZ <span className="text-xs text-muted-foreground">({aiPreview.normalized.valueWei} wei)</span></div>
+                            <div><span className="text-muted-foreground">Type:</span> {aiPreview.normalized.actionType === 0 ? "Native Transfer" : "Contract Call"}</div>
+                            {aiPreview.normalized.actionType === 1 && aiPreview.normalized.dataHex && (
+                              <div><span className="text-muted-foreground">Calldata:</span> <span className="font-mono text-xs break-all">{aiPreview.normalized.dataHex}</span></div>
+                            )}
+                            <div><span className="text-muted-foreground">Reason:</span> {aiPreview.normalized.reason}</div>
+                            <div><span className="text-muted-foreground">Expires:</span> {new Date(aiPreview.normalized.expiresAt * 1000).toLocaleString()}</div>
+                          </>
+                        )}
+                        <div className="flex items-center gap-3 pt-2 border-t border-border mt-2">
+                          <div className={`flex items-center gap-1.5 text-xs font-medium ${aiPreview.submitReady ? "text-green-400" : "text-yellow-400"}`}>
+                            {aiPreview.submitReady ? "✅ Ready to submit" : "⚠️ Not ready to submit"}
+                          </div>
+                          <div className={`flex items-center gap-1.5 text-xs font-medium ${aiPreview.policyCheck?.allowed ? "text-green-400" : "text-red-400"}`}>
+                            {aiPreview.policyCheck?.allowed ? "✅ Policy allows" : "❌ Blocked by policy"}
+                          </div>
+                        </div>
+                        {!aiPreview.policyCheck?.allowed && (
+                          <p className="text-xs text-red-400 mt-1">This action is not allowed by the vault's current policy. Update the policy or adjust the proposal.</p>
+                        )}
                         <p className="text-xs text-muted-foreground mt-2">Review the details, then submit using the form →</p>
                       </div>
                     )}
