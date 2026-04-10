@@ -20,6 +20,36 @@ CALL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 ZERO_HEX = "0x"
+AGENT_PROPOSAL_BOARD_ABI = [
+    {
+        "type": "function",
+        "name": "checkActionAgainstPolicy",
+        "inputs": [
+            {"name": "vaultId", "type": "uint256", "internalType": "uint256"},
+            {"name": "target", "type": "address", "internalType": "address"},
+            {"name": "value", "type": "uint256", "internalType": "uint256"},
+            {"name": "data", "type": "bytes", "internalType": "bytes"},
+            {"name": "actionType", "type": "uint8", "internalType": "enum AgentProposalBoard.ActionType"},
+        ],
+        "outputs": [{"name": "", "type": "bool", "internalType": "bool"}],
+        "stateMutability": "view",
+    },
+    {
+        "type": "function",
+        "name": "submitProposal",
+        "inputs": [
+            {"name": "vaultId", "type": "uint256", "internalType": "uint256"},
+            {"name": "target", "type": "address", "internalType": "address"},
+            {"name": "value", "type": "uint256", "internalType": "uint256"},
+            {"name": "data", "type": "bytes", "internalType": "bytes"},
+            {"name": "actionType", "type": "uint8", "internalType": "enum AgentProposalBoard.ActionType"},
+            {"name": "reason", "type": "string", "internalType": "string"},
+            {"name": "expiresAt", "type": "uint64", "internalType": "uint64"},
+        ],
+        "outputs": [{"name": "proposalId", "type": "uint256", "internalType": "uint256"}],
+        "stateMutability": "nonpayable",
+    },
+]
 
 
 def _load_env_file(path: Path) -> None:
@@ -64,11 +94,10 @@ class AgentSafeService:
         self.board = None
         self.account = Account.from_key(config.private_key) if config.private_key else None
         if config.board_address:
-            manifest = json.loads(
-                (Path(__file__).resolve().parents[1] / "docs" / "lovable-contract-manifest.etherlink-shadownet.json").read_text()
+            self.board = self.w3.eth.contract(
+                address=Web3.to_checksum_address(config.board_address),
+                abi=AGENT_PROPOSAL_BOARD_ABI,
             )
-            abi = manifest["contracts"]["AgentProposalBoard"]["abi"]
-            self.board = self.w3.eth.contract(address=Web3.to_checksum_address(config.board_address), abi=abi)
 
     def preview(self, payload: dict[str, Any]) -> dict[str, Any]:
         normalized = self._normalize_payload(payload)
