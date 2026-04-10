@@ -69,3 +69,21 @@ The exact Solidity contract sources used for the deployed version of the site ar
 
 ## Repo Note
 Per the requested change scope, only this `README.md` file was updated and the deployed contract source files were added.
+
+## Backend For Render
+This repo also includes the backend used for AI proposal preview and onchain submission:
+- `backend/agent_service.py`
+- `backend/.env.example`
+- `backend/requirements.txt`
+
+Recommended Render commands:
+
+Build:
+```bash
+pip install -r backend/requirements.txt
+```
+
+Start:
+```bash
+python3 backend/agent_service.py
+```
