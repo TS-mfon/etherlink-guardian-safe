@@ -1,11 +1,11 @@
 import { useEffect, useState, useCallback } from "react";
 import { useParams, Link } from "react-router-dom";
+import { z } from "zod";
 import Layout from "@/components/Layout";
 import { useWallet } from "@/contexts/WalletContext";
 import { useContracts, type VaultData, type PolicyData } from "@/hooks/useContracts";
 import AddressDisplay from "@/components/AddressDisplay";
 import TxButton from "@/components/TxButton";
-import StatusBadge from "@/components/StatusBadge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
@@ -13,9 +13,58 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Shield, ArrowLeft, Send, UserPlus, UserMinus, Settings, Vote, Wallet } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import EmptyState from "@/components/EmptyState";
-import { formatEther } from "ethers";
+import { formatEther, isAddress } from "ethers";
 import { BACKEND } from "@/config/contracts";
 import { toast } from "sonner";
+
+type ProposalPreviewResponse = {
+  intent: string;
+  normalized?: {
+    vaultId: number;
+    actionType: number;
+    target: string;
+    valueWei: number | string;
+    valueXtz: string;
+    dataHex: string;
+    reason: string;
+    expiresAt: number;
+  };
+  submitReady: boolean;
+  policyCheck?: {
+    allowed: boolean;
+  } | null;
+};
+
+const addressSchema = z.string().trim().refine((value) => isAddress(value), {
+  message: "Enter a valid 0x address.",
+});
+
+const transferAmountSchema = z.string().trim().refine((value) => {
+  const amount = Number(value);
+  return Number.isFinite(amount) && amount > 0;
+}, {
+  message: "Enter a valid XTZ amount greater than 0.",
+});
+
+const optionalAmountSchema = z.string().trim().refine((value) => {
+  const amount = Number(value);
+  return Number.isFinite(amount) && amount >= 0;
+}, {
+  message: "Enter a valid XTZ amount.",
+});
+
+const calldataSchema = z.string().trim().regex(/^0x[0-9a-fA-F]+$/, {
+  message: "Calldata must be a hex string starting with 0x.",
+}).refine((value) => (value.length - 2) % 2 === 0, {
+  message: "Calldata hex must have an even number of characters.",
+});
+
+const expirySchema = z.string().trim().refine((value) => {
+  const hours = Number(value);
+  return Number.isInteger(hours) && hours > 0;
+}, {
+  message: "Expiry must be a whole number of hours greater than 0.",
+});
 
 export default function VaultDetail() {
   const { id } = useParams<{ id: string }>();
@@ -29,13 +78,10 @@ export default function VaultDetail() {
   const [isOp, setIsOp] = useState(false);
   const [loading, setLoading] = useState(true);
 
-  // Deposit
   const [depositAmount, setDepositAmount] = useState("");
-  // Add operator
   const [newOperator, setNewOperator] = useState("");
   const [removeOpAddr, setRemoveOpAddr] = useState("");
 
-  // Proposal form
   const [propTarget, setPropTarget] = useState("");
   const [propValue, setPropValue] = useState("");
   const [propData, setPropData] = useState("0x");
@@ -43,13 +89,9 @@ export default function VaultDetail() {
   const [propReason, setPropReason] = useState("");
   const [propExpiry, setPropExpiry] = useState("24");
 
-  // AI preview
-  const [aiPrompt, setAiPrompt] = useState("");
-  const [aiPreview, setAiPreview] = useState<any>(null);
+  const [aiPreview, setAiPreview] = useState<ProposalPreviewResponse | null>(null);
   const [aiLoading, setAiLoading] = useState(false);
 
-  // Policy edit
-  const [editPolicy, setEditPolicy] = useState(false);
   const [pApproval, setPApproval] = useState(true);
   const [pMaxVal, setPMaxVal] = useState("10");
   const [pCooldown, setPCooldown] = useState("60");
@@ -68,7 +110,6 @@ export default function VaultDetail() {
       setIsOwner(v.owner.toLowerCase() === address.toLowerCase());
       const op = await contracts.isOperator(vaultId, address);
       setIsOp(op);
-      // Seed policy form
       setPApproval(p.approvalRequired);
       setPMaxVal(formatEther(p.maxValuePerTx));
       setPCooldown(String(p.cooldownSeconds));
@@ -83,39 +124,131 @@ export default function VaultDetail() {
     }
   }, [isConnected, address, vaultId, contracts]);
 
-  useEffect(() => { reload(); }, [reload]);
+  useEffect(() => {
+    reload();
+  }, [reload]);
 
-  const parseAddrs = (s: string) => s.split(",").map(a => a.trim()).filter(a => a.length === 42);
+  const parseAddrs = (s: string) => s.split(",").map((a) => a.trim()).filter((a) => a.length === 42);
+
+  const parseBackendError = useCallback(async (response: Response) => {
+    const fallback = `Backend error (${response.status})`;
+    const bodyText = await response.text();
+
+    if (!bodyText) return fallback;
+
+    try {
+      const parsed = JSON.parse(bodyText);
+      return parsed.error || bodyText;
+    } catch {
+      return bodyText;
+    }
+  }, []);
+
+  const postBackend = useCallback(async (path: string, body: Record<string, unknown>) => {
+    try {
+      const response = await fetch(`${BACKEND.agentServiceBaseUrl}${path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+
+      if (!response.ok) {
+        throw new Error(await parseBackendError(response));
+      }
+
+      return await response.json();
+    } catch (error) {
+      if (error instanceof TypeError) {
+        throw new Error("Proposal service is unavailable right now. Please try again.");
+      }
+      throw error;
+    }
+  }, [parseBackendError]);
+
+  const buildProposalRequest = useCallback(() => {
+    const expiryHours = expirySchema.parse(propExpiry.trim() || "24");
+    const target = addressSchema.parse(propTarget.trim());
+    const reason = propReason.trim();
+    const expiresAt = Math.floor(Date.now() / 1000) + Number(expiryHours) * 3600;
+
+    if (propActionType === 0) {
+      const amount = transferAmountSchema.parse(propValue.trim());
+      const intent = `send ${amount} xtz to ${target.toLowerCase()}`;
+
+      return {
+        intent,
+        requestBody: {
+          vaultId,
+          intent,
+          actionType: 0,
+          target,
+          valueXtz: amount,
+          data: "0x",
+          reason,
+          expiresAt,
+        },
+      };
+    }
+
+    const dataHex = calldataSchema.parse(propData.trim());
+    const callValue = optionalAmountSchema.parse(propValue.trim() || "0");
+    const intent = `call ${target.toLowerCase()} with data ${dataHex.toLowerCase()}`;
+
+    return {
+      intent,
+      requestBody: {
+        vaultId,
+        intent,
+        actionType: 1,
+        target,
+        valueXtz: callValue,
+        data: dataHex,
+        reason,
+        expiresAt,
+      },
+    };
+  }, [propActionType, propData, propExpiry, propReason, propTarget, propValue, vaultId]);
 
   const handleAiPreview = async () => {
     setAiLoading(true);
+    setAiPreview(null);
+
     try {
-      const res = await fetch(`${BACKEND.agentServiceBaseUrl}/agent/proposal-preview`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ vaultId, prompt: aiPrompt }),
-      });
-      if (!res.ok) {
-        const errBody = await res.text();
-        throw new Error(`Backend error (${res.status}): ${errBody}`);
-      }
-      const data = await res.json();
+      const { requestBody } = buildProposalRequest();
+      const data = await postBackend("/agent/proposal-preview", requestBody) as ProposalPreviewResponse;
       setAiPreview(data);
-      // Pre-fill proposal form from normalized response
-      const n = data.normalized;
-      if (n) {
-        if (n.target) setPropTarget(n.target);
-        if (n.valueXtz) setPropValue(n.valueXtz);
-        if (n.dataHex) setPropData(n.dataHex);
-        if (n.actionType !== undefined) setPropActionType(n.actionType);
-        if (n.reason) setPropReason(n.reason);
+
+      if (data.normalized) {
+        setPropActionType(data.normalized.actionType);
+        setPropTarget(data.normalized.target);
+        setPropValue(String(data.normalized.valueXtz));
+        setPropData(data.normalized.dataHex);
+        setPropReason(data.normalized.reason);
+      }
+
+      if (!data.submitReady || data.policyCheck?.allowed === false) {
+        toast.warning("Preview generated, but this action is currently blocked by policy.");
       }
     } catch (err: any) {
-      toast.error(err.message || "Failed to get proposal preview");
+      toast.error(err.message || "Failed to generate proposal preview");
     } finally {
       setAiLoading(false);
     }
   };
+
+  const handleProposalSubmit = async () => {
+    const { requestBody } = buildProposalRequest();
+    const data = await postBackend("/agent/proposal-submit", requestBody) as { txHash: string };
+
+    return {
+      hash: data.txHash,
+      wait: async () => data,
+    };
+  };
+
+  const hasProposalInputs = propActionType === 0
+    ? Boolean(propTarget.trim() && propValue.trim())
+    : Boolean(propTarget.trim() && propData.trim());
 
   if (!isConnected) {
     return (
@@ -149,6 +282,7 @@ export default function VaultDetail() {
 
   const canManage = isOwner;
   const canPropose = isOwner || isOp;
+  const policyAllowed = aiPreview?.policyCheck?.allowed;
 
   return (
     <Layout>
@@ -157,7 +291,6 @@ export default function VaultDetail() {
           <ArrowLeft className="h-4 w-4" /> Back to Vaults
         </Link>
 
-        {/* Header */}
         <div className="glass-card p-6 mb-6">
           <div className="flex items-start justify-between flex-wrap gap-4">
             <div className="flex items-center gap-4">
@@ -239,52 +372,74 @@ export default function VaultDetail() {
               </div>
             ) : (
               <div className="grid gap-6 lg:grid-cols-2">
-                {/* AI Preview */}
                 <div className="glass-card p-6">
-                  <h3 className="font-semibold mb-4 flex items-center gap-2">🤖 Proposal Preview</h3>
+                  <h3 className="font-semibold mb-4 flex items-center gap-2">Proposal Preview</h3>
                   <p className="text-xs text-muted-foreground mb-3">
-                    Describe what you want to do and the backend will prepare a proposal for review.
+                    Generate a backend preview from the validated form fields using the deployed Guardian Safe service.
                   </p>
                   <div className="space-y-3">
-                    <Input value={aiPrompt} onChange={(e) => setAiPrompt(e.target.value)} placeholder="e.g. Send 1 XTZ to 0x..." />
-                    <Button onClick={handleAiPreview} disabled={!aiPrompt || aiLoading} variant="secondary" className="w-full">
+                    <div className="rounded-lg border border-border bg-muted/40 p-3 text-xs space-y-2">
+                      <p className="font-medium text-foreground">Exact backend intent formats</p>
+                      <p className="text-muted-foreground break-all">
+                        Native transfer: <span className="font-mono text-foreground">send 1 xtz to 0x1111111111111111111111111111111111111111</span>
+                      </p>
+                      <p className="text-muted-foreground break-all">
+                        Contract call: <span className="font-mono text-foreground">call 0x1111111111111111111111111111111111111111 with data 0x1234</span>
+                      </p>
+                    </div>
+                    <Button onClick={handleAiPreview} disabled={!hasProposalInputs || aiLoading} variant="secondary" className="w-full">
                       {aiLoading ? "Generating..." : "Generate Preview"}
                     </Button>
                     {aiPreview && (
-                      <div className="rounded-lg bg-muted p-3 text-sm space-y-2">
-                        {aiPreview.intent && (
-                          <div><span className="text-muted-foreground">Intent:</span> {aiPreview.intent}</div>
-                        )}
-                        {aiPreview.normalized && (
-                          <>
-                            <div><span className="text-muted-foreground">Target:</span> <span className="font-mono text-xs">{aiPreview.normalized.target}</span></div>
-                            <div><span className="text-muted-foreground">Value:</span> {aiPreview.normalized.valueXtz} XTZ <span className="text-xs text-muted-foreground">({aiPreview.normalized.valueWei} wei)</span></div>
-                            <div><span className="text-muted-foreground">Type:</span> {aiPreview.normalized.actionType === 0 ? "Native Transfer" : "Contract Call"}</div>
-                            {aiPreview.normalized.actionType === 1 && aiPreview.normalized.dataHex && (
-                              <div><span className="text-muted-foreground">Calldata:</span> <span className="font-mono text-xs break-all">{aiPreview.normalized.dataHex}</span></div>
-                            )}
-                            <div><span className="text-muted-foreground">Reason:</span> {aiPreview.normalized.reason}</div>
-                            <div><span className="text-muted-foreground">Expires:</span> {new Date(aiPreview.normalized.expiresAt * 1000).toLocaleString()}</div>
-                          </>
-                        )}
-                        <div className="flex items-center gap-3 pt-2 border-t border-border mt-2">
-                          <div className={`flex items-center gap-1.5 text-xs font-medium ${aiPreview.submitReady ? "text-green-400" : "text-yellow-400"}`}>
-                            {aiPreview.submitReady ? "✅ Ready to submit" : "⚠️ Not ready to submit"}
+                      <div className="rounded-lg border border-border bg-muted p-4 text-sm space-y-3">
+                        <div className="grid gap-2">
+                          <div>
+                            <span className="text-muted-foreground">Intent:</span>{" "}
+                            <span className="font-mono text-xs break-all">{aiPreview.intent}</span>
                           </div>
-                          <div className={`flex items-center gap-1.5 text-xs font-medium ${aiPreview.policyCheck?.allowed ? "text-green-400" : "text-red-400"}`}>
-                            {aiPreview.policyCheck?.allowed ? "✅ Policy allows" : "❌ Blocked by policy"}
+                          {aiPreview.normalized && (
+                            <>
+                              <div><span className="text-muted-foreground">Vault ID:</span> {aiPreview.normalized.vaultId}</div>
+                              <div><span className="text-muted-foreground">Action Type:</span> {aiPreview.normalized.actionType}</div>
+                              <div><span className="text-muted-foreground">Target:</span> <span className="font-mono text-xs break-all">{aiPreview.normalized.target}</span></div>
+                              <div><span className="text-muted-foreground">Value (XTZ):</span> {aiPreview.normalized.valueXtz}</div>
+                              <div><span className="text-muted-foreground">Value (Wei):</span> <span className="font-mono text-xs break-all">{aiPreview.normalized.valueWei}</span></div>
+                              <div><span className="text-muted-foreground">Data Hex:</span> <span className="font-mono text-xs break-all">{aiPreview.normalized.dataHex}</span></div>
+                              <div><span className="text-muted-foreground">Reason:</span> {aiPreview.normalized.reason}</div>
+                              <div><span className="text-muted-foreground">Expires At:</span> {new Date(aiPreview.normalized.expiresAt * 1000).toLocaleString()}</div>
+                            </>
+                          )}
+                        </div>
+
+                        <div className="grid gap-2 sm:grid-cols-2">
+                          <div className={`rounded-md border px-3 py-2 ${aiPreview.submitReady ? "border-primary/30 bg-primary/10 text-primary" : "border-secondary/40 bg-secondary text-secondary-foreground"}`}>
+                            <div className="text-xs uppercase tracking-wide">Submit Ready</div>
+                            <div className="text-sm font-medium">{aiPreview.submitReady ? "Yes" : "No"}</div>
+                          </div>
+                          <div className={`rounded-md border px-3 py-2 ${policyAllowed === true ? "border-primary/30 bg-primary/10 text-primary" : policyAllowed === false ? "border-destructive/30 bg-destructive/10 text-destructive" : "border-border bg-background text-foreground"}`}>
+                            <div className="text-xs uppercase tracking-wide">Policy Check</div>
+                            <div className="text-sm font-medium">
+                              {policyAllowed === true ? "Allowed" : policyAllowed === false ? "Blocked" : "Unavailable"}
+                            </div>
                           </div>
                         </div>
-                        {!aiPreview.policyCheck?.allowed && (
-                          <p className="text-xs text-red-400 mt-1">This action is not allowed by the vault's current policy. Update the policy or adjust the proposal.</p>
+
+                        {!aiPreview.submitReady && (
+                          <div className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+                            This action is currently blocked by the vault policy. Adjust the proposal or update the policy before submitting.
+                          </div>
                         )}
-                        <p className="text-xs text-muted-foreground mt-2">Review the details, then submit using the form →</p>
+
+                        {policyAllowed === false && (
+                          <div className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+                            Policy warning: the backend rejected this action against the current vault policy.
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
                 </div>
 
-                {/* Manual form */}
                 <div className="glass-card p-6">
                   <h3 className="font-semibold mb-4 flex items-center gap-2"><Vote className="h-4 w-4" /> Submit Proposal</h3>
                   <div className="space-y-3">
@@ -300,37 +455,34 @@ export default function VaultDetail() {
                       </select>
                     </div>
                     <div>
-                      <Label>Target Address</Label>
+                      <Label>{propActionType === 0 ? "Recipient Address" : "Target Address"}</Label>
                       <Input value={propTarget} onChange={(e) => setPropTarget(e.target.value)} placeholder="0x..." className="mt-1.5 font-mono text-sm" />
                     </div>
                     <div>
-                      <Label>Value (XTZ)</Label>
+                      <Label>{propActionType === 0 ? "Amount (XTZ)" : "Value (XTZ, optional)"}</Label>
                       <Input value={propValue} onChange={(e) => setPropValue(e.target.value)} type="number" step="0.001" placeholder="0.0" className="mt-1.5" />
                     </div>
                     {propActionType === 1 && (
                       <div>
                         <Label>Calldata (hex)</Label>
-                        <Input value={propData} onChange={(e) => setPropData(e.target.value)} placeholder="0x..." className="mt-1.5 font-mono text-sm" />
+                        <Input value={propData} onChange={(e) => setPropData(e.target.value)} placeholder="0x1234" className="mt-1.5 font-mono text-sm" />
                       </div>
                     )}
                     <div>
                       <Label>Reason</Label>
-                      <Input value={propReason} onChange={(e) => setPropReason(e.target.value)} placeholder="Payment for..." className="mt-1.5" />
+                      <Input value={propReason} onChange={(e) => setPropReason(e.target.value)} placeholder="Optional — backend will infer if blank" className="mt-1.5" />
                     </div>
                     <div>
                       <Label>Expiry (hours)</Label>
                       <Input value={propExpiry} onChange={(e) => setPropExpiry(e.target.value)} type="number" className="mt-1.5" />
                     </div>
                     <TxButton
-                      onClick={() => {
-                        const expiresAt = Math.floor(Date.now() / 1000) + parseInt(propExpiry) * 3600;
-                        return contracts.submitProposal(vaultId, propTarget, propValue || "0", propData, propActionType, propReason, expiresAt);
-                      }}
-                      disabled={!propTarget || !propReason}
+                      onClick={handleProposalSubmit}
+                      disabled={!hasProposalInputs}
                       successMessage="Proposal submitted!"
                       onSuccess={reload}
                     >
-                      Submit Proposal
+                      Submit via Backend
                     </TxButton>
                   </div>
                 </div>
